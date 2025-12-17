@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>3D Christmas Tree with Hand Gestures</title>
+    
+    <!-- 引入 MediaPipe 库 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505;
+            background: radial-gradient(circle at center, #1a1a1a 0%, #000000 100%);
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            color: white;
+            touch-action: none;
+            cursor: none;
+        }
+        
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            pointer-events: none;
+            mix-blend-mode: difference;
+        }
+
+        h1 {
+            font-size: 1.1rem;
+            font-weight: 300;
+            margin: 0;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.9);
+        }
+
+        p {
+            font-size: 0.75rem;
+            margin-top: 8px;
+            color: rgba(255, 255, 255, 0.6);
+            letter-spacing: 0.05em;
+        }
+
+        .instruction {
+            display: block;
+            margin-top: 5px;
+        }
+
+        #btn-camera {
+            pointer-events: auto;
+            margin-top: 15px;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            border-radius: 20px;
+            position: relative;
+            z-index: 101;
+        }
+
+        #btn-camera:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* 摄像头预览窗口 */
+        .camera-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            z-index: 20;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            overflow: hidden;
+            background: #000;
+            display: none; /* 默认隐藏，点击按钮后显示 */
+            transform: scaleX(-1); /* 镜像翻转预览 */
+        }
+
+        .input_video {
+            display: none; /* 隐藏原始 video 标签 */
+        }
+        
+        #output_canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #loading-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 0.7rem;
+            color: #aaa;
+            display: none;
+        }
+
+        #glow-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 600px;
+            height: 600px;
+            transform: translate(-50%, -50%);
+            background: radial-gradient(circle, rgba(40, 80, 40, 0.1) 0%, rgba(0,0,0,0) 70%);
+            pointer-events: none;
+            z-index: 0;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="glow-overlay"></div>
+
+    <div id="ui-layer">
+        <h1>Organic Geometry Tree</h1>
+        <p>
+            <span class="instruction">🖱️ 鼠标交互：左右移动旋转 · 点击爆发</span>
+            <span class="instruction">📷 摄像头交互：手掌左右移动 · 捏合手指爆发</span>
+        </p>
+        <button id="btn-camera">开启摄像头控制</button>
+    </div>
+
+    <!-- 摄像头预览区域 -->
+    <div class="camera-container" id="camera-preview">
+        <video class="input_video"></video>
+        <canvas id="output_canvas" width="160" height="120"></canvas>
+        <div id="loading-text">Loading AI...</div>
+    </div>
+
+    <canvas id="treeCanvas"></canvas>
+
+<script>
+    /**
+     * PART 1: 3D Christmas Tree Core Logic
+     */
+    const canvas = document.getElementById('treeCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+    let particles = [];
+    
+    // 交互状态变量
+    let targetRotationSpeed = 0.003;
+    let currentRotationSpeed = 0.003;
+    let autoRotate = true;
+    let explodeForce = 0;
+    
+    // 区分鼠标控制和摄像头控制
+    let isHandControlling = false;
+    let cameraInstance = null;
+    let handsInstance = null;
+    let isCameraRunning = false;
+
+    const PARTICLE_COUNT = 8000; // 优化：减少粒子数量
+    const TREE_HEIGHT = 500;     
+    const BASE_RADIUS = 200;     
+    const FOCAL_LENGTH = 800;    
+    const SPIN_LAYER_DENSITY = 1.5; 
+    const CONFETTI_COUNT = 250; // 优化：减少彩带数量
+    const GIFT_COUNT = 10; // 优化：减少礼物数量
+    const LEAF_COUNT = 1200; // 优化：减少树叶数量
+    const ORNAMENT_COUNT = 120; // 优化：减少铃铛星星数量
+    
+    // 星星跳动控制
+    let hasExplodedOnce = false; // 是否已经爆开过一次
+    let starJumpOffset = 0; // 星星跳动偏移
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // 彩带碎片类
+    class Confetti {
+        constructor() {
+            this.init();
+        }
+        
+        init() {
+            // 随机分布在树的范围内，底部更密集
+            let t = Math.pow(Math.random(), 0.4); // 更小的指数让底部更密集
+            this.y = -TREE_HEIGHT / 2 + t * TREE_HEIGHT;
+            let yPercent = (this.y + TREE_HEIGHT / 2) / TREE_HEIGHT;
+            this.baseRadius = yPercent * BASE_RADIUS * (0.7 + Math.random() * 0.5);
+            this.angle = Math.random() * Math.PI * 2;
+            
+            // 碎片大小和形状
+            this.width = 3 + Math.random() * 5;
+            this.height = 2 + Math.random() * 3;
+            this.rotation = Math.random() * Math.PI * 2;
+            this.rotationSpeed = (Math.random() - 0.5) * 0.2;
+            
+            // 颜色
+            const colors = [
+                '#FFD700', '#FF4444', '#C0C0C0', '#FF6B6B', 
+                '#4169E1', '#FFB6C1', '#00CED1', '#FF8C00',
+                '#9370DB', '#32CD32', '#FF69B4', '#FAFAD2'
+            ];
+            this.color = colors[Math.floor(Math.random() * colors.length)];
+            
+            // 爆炸速度
+            this.vx = (Math.random() - 0.5) * 30;
+            this.vy = (Math.random() - 0.5) * 30;
+            this.vz = (Math.random() - 0.5) * 30;
+            this.dx = 0;
+            this.dy = 0;
+            this.dz = 0;
+        }
+        
+        update() {
+            this.rotation += this.rotationSpeed;
+            if (explodeForce > 0.01) {
+                this.dx += this.vx * explodeForce * 0.6;
+                this.dy += this.vy * explodeForce * 0.6;
+                this.dz += this.vz * explodeForce * 0.6;
+            } else {
+                this.dx *= 0.92;
+                this.dy *= 0.92;
+                this.dz *= 0.92;
+            }
+        }
+        
+        render(rotationOffset, ctx) {
+            let effectiveAngle = this.angle + rotationOffset;
+            let xPos = Math.cos(effectiveAngle) * this.baseRadius + this.dx;
+            let zPos = Math.sin(effectiveAngle) * this.baseRadius + this.dz;
+            let yPos = this.y + this.dy;
+            
+            let zDepth = FOCAL_LENGTH + zPos;
+            if (zDepth < 10) zDepth = 10;
+            let scale = FOCAL_LENGTH / zDepth;
+            
+            let screenX = width / 2 + xPos * scale;
+            let screenY = height / 2 + yPos * scale + 50;
+            
+            ctx.save();
+            ctx.translate(screenX, screenY);
+            ctx.rotate(this.rotation);
+            ctx.globalAlpha = Math.min(1, scale * 0.9);
+            ctx.fillStyle = this.color;
+            ctx.fillRect(-this.width * scale / 2, -this.height * scale / 2, 
+                        this.width * scale, this.height * scale);
+            ctx.restore();
+        }
+    }
+    
+    // 树叶类 - 贴着圣诞树边缘
+    class Leaf {
+        constructor() {
+            this.init();
+        }
+        
+        init() {
+            // 树叶分布在树的边缘，底部更密集
+            let t = Math.pow(Math.random(), 0.35); // 更小的指数让底部更密集
+            this.y = -TREE_HEIGHT / 2 + t * TREE_HEIGHT;
+            let yPercent = (this.y + TREE_HEIGHT / 2) / TREE_HEIGHT;
+            // 树叶贴着边缘，只在80%-110%的半径范围
+            this.baseRadius = yPercent * BASE_RADIUS * (0.8 + Math.random() * 0.3);
+            this.angle = Math.random() * Math.PI * 2;
+            
+            // 树叶大小
+            this.size = 6 + Math.random() * 10;
+            this.rotation = Math.random() * Math.PI * 2;
+            this.rotationSpeed = (Math.random() - 0.5) * 0.08;
+            
+            // 绿色变化
+            this.hue = 100 + Math.random() * 60;
+            this.lightness = 18 + Math.random() * 28;
+            
+            // 爆炸速度
+            this.vx = (Math.random() - 0.5) * 25;
+            this.vy = (Math.random() - 0.5) * 25;
+            this.vz = (Math.random() - 0.5) * 25;
+            this.dx = 0;
+            this.dy = 0;
+            this.dz = 0;
+        }
+        
+        update() {
+            this.rotation += this.rotationSpeed;
+            if (explodeForce > 0.01) {
+                this.dx += this.vx * explodeForce * 0.5;
+                this.dy += this.vy * explodeForce * 0.5;
+                this.dz += this.vz * explodeForce * 0.5;
+            } else {
+                this.dx *= 0.92;
+                this.dy *= 0.92;
+                this.dz *= 0.92;
+            }
+        }
+        
+        render(rotationOffset, ctx) {
+            let effectiveAngle = this.angle + rotationOffset;
+            let xPos = Math.cos(effectiveAngle) * this.baseRadius + this.dx;
+            let zPos = Math.sin(effectiveAngle) * this.baseRadius + this.dz;
+            let yPos = this.y + this.dy;
+            
+            let zDepth = FOCAL_LENGTH + zPos;
+            if (zDepth < 10) zDepth = 10;
+            let scale = FOCAL_LENGTH / zDepth;
+            
+            let screenX = width / 2 + xPos * scale;
+            let screenY = height / 2 + yPos * scale + 50;
+            let leafSize = this.size * scale;
+            
+            ctx.save();
+            ctx.translate(screenX, screenY);
+            ctx.rotate(this.rotation);
+            ctx.globalAlpha = Math.min(0.95, scale * 0.85);
+            
+            // 绘制树叶形状
+            ctx.fillStyle = `hsl(${this.hue}, 75%, ${this.lightness}%)`;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, leafSize / 2, leafSize / 3.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // 叶脉
+            ctx.strokeStyle = `hsl(${this.hue}, 60%, ${this.lightness - 8}%)`;
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(-leafSize / 2, 0);
+            ctx.lineTo(leafSize / 2, 0);
+            ctx.stroke();
+            
+            ctx.restore();
+        }
+    }
+    
+    // 铃铛和星星装饰类
+    class Ornament {
+        constructor() {
+            this.init();
+        }
+        
+        init() {
+            // 分布在树的边缘，底部更密集
+            let t = Math.pow(Math.random(), 0.4); // 更小的指数让底部更密集
+            this.y = -TREE_HEIGHT / 2 + t * TREE_HEIGHT;
+            let yPercent = (this.y + TREE_HEIGHT / 2) / TREE_HEIGHT;
+            this.baseRadius = yPercent * BASE_RADIUS * (0.95 + Math.random() * 0.15);
+            this.angle = Math.random() * Math.PI * 2;
+            
+            // 类型：铃铛或星星
+            this.type = Math.random() > 0.5 ? 'bell' : 'star';
+            this.size = 8 + Math.random() * 8;
+            this.rotation = Math.random() * Math.PI * 2;
+            this.rotationSpeed = (Math.random() - 0.5) * 0.1;
+            this.swingPhase = Math.random() * Math.PI * 2;
+            this.swingSpeed = 0.02 + Math.random() * 0.03;
+            
+            // 颜色
+            const bellColors = ['#FFD700', '#C0C0C0', '#CD7F32', '#FFB6C1', '#87CEEB'];
+            const starColors = ['#FFD700', '#FFFF00', '#FFA500', '#FF69B4', '#00FFFF', '#FFFFFF'];
+            
+            if (this.type === 'bell') {
+                this.color = bellColors[Math.floor(Math.random() * bellColors.length)];
+            } else {
+                this.color = starColors[Math.floor(Math.random() * starColors.length)];
+            }
+            
+            // 爆炸速度
+            this.vx = (Math.random() - 0.5) * 28;
+            this.vy = (Math.random() - 0.5) * 28;
+            this.vz = (Math.random() - 0.5) * 28;
+            this.dx = 0;
+            this.dy = 0;
+            this.dz = 0;
+        }
+        
+        update() {
+            this.rotation += this.rotationSpeed;
+            this.swingPhase += this.swingSpeed;
+            if (explodeForce > 0.01) {
+                this.dx += this.vx * explodeForce * 0.6;
+                this.dy += this.vy * explodeForce * 0.6;
+                this.dz += this.vz * explodeForce * 0.6;
+            } else {
+                this.dx *= 0.92;
+                this.dy *= 0.92;
+                this.dz *= 0.92;
+            }
+        }
+        
+        render(rotationOffset, ctx) {
+            let effectiveAngle = this.angle + rotationOffset;
+            let swing = Math.sin(this.swingPhase) * 3;
+            let xPos = Math.cos(effectiveAngle) * this.baseRadius + this.dx;
+            let zPos = Math.sin(effectiveAngle) * this.baseRadius + this.dz;
+            let yPos = this.y + this.dy + swing;
+            
+            let zDepth = FOCAL_LENGTH + zPos;
+            if (zDepth < 10) zDepth = 10;
+            let scale = FOCAL_LENGTH / zDepth;
+            
+            let screenX = width / 2 + xPos * scale;
+            let screenY = height / 2 + yPos * scale + 50;
+            let ornamentSize = this.size * scale;
+            
+            ctx.save();
+            ctx.translate(screenX, screenY);
+            ctx.rotate(this.rotation);
+            ctx.globalAlpha = Math.min(1, scale * 0.9);
+            
+            if (this.type === 'bell') {
+                // 绘制圆形铃铛
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 8;
+                ctx.shadowColor = this.color;
+                
+                // 圆形铃铛主体
+                ctx.beginPath();
+                ctx.arc(0, 0, ornamentSize / 2, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // 铃铛顶部挂钩
+                ctx.strokeStyle = this.color;
+                ctx.lineWidth = ornamentSize / 8;
+                ctx.beginPath();
+                ctx.arc(0, -ornamentSize / 2 - ornamentSize / 6, ornamentSize / 6, 0, Math.PI, true);
+                ctx.stroke();
+                
+                // 中间横线
+                ctx.strokeStyle = this.darkenColor ? this.darkenColor(this.color, 60) : 'rgba(0,0,0,0.4)';
+                ctx.lineWidth = ornamentSize / 10;
+                ctx.beginPath();
+                ctx.moveTo(-ornamentSize / 2.5, 0);
+                ctx.lineTo(ornamentSize / 2.5, 0);
+                ctx.stroke();
+                
+                // 只在一端有黑色小圆形（铃舌效果）
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.beginPath();
+                ctx.arc(0, ornamentSize / 2.5, ornamentSize / 7, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // 高光
+                ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                ctx.beginPath();
+                ctx.arc(-ornamentSize / 5, -ornamentSize / 5, ornamentSize / 5, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.shadowBlur = 0;
+            } else {
+                // 绘制星星
+                ctx.fillStyle = this.color;
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = this.color;
+                ctx.beginPath();
+                for (let i = 0; i < 5; i++) {
+                    let outerAngle = (i * 72 - 90) * Math.PI / 180;
+                    let innerAngle = ((i * 72) + 36 - 90) * Math.PI / 180;
+                    ctx.lineTo(Math.cos(outerAngle) * ornamentSize / 2, Math.sin(outerAngle) * ornamentSize / 2);
+                    ctx.lineTo(Math.cos(innerAngle) * ornamentSize / 4, Math.sin(innerAngle) * ornamentSize / 4);
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+            
+            ctx.restore();
+        }
+        
+        darkenColor(color, amount) {
+            if (color.startsWith('#')) {
+                const hex = color.replace('#', '');
+                const r = Math.max(0, parseInt(hex.substr(0, 2), 16) - amount);
+                const g = Math.max(0, parseInt(hex.substr(2, 2), 16) - amount);
+                const b = Math.max(0, parseInt(hex.substr(4, 2), 16) - amount);
+                return `rgb(${r},${g},${b})`;
+            }
+            return 'rgba(0,0,0,0.4)';
+        }
+    }
+    
+    // 礼物盒类 - 复杂旋转路径
+    class GiftBox {
+        constructor(index) {
+            this.init(index);
+        }
+        
+        init(index) {
+            // 围绕树底部分布，使用不同的轨道
+            this.baseAngle = (index / GIFT_COUNT) * Math.PI * 2;
+            this.orbitRadius = 100 + Math.random() * 100;
+            this.orbitSpeed = 0.3 + Math.random() * 0.4; // 轨道速度倍率
+            this.orbitPhase = Math.random() * Math.PI * 2;
+            this.verticalOffset = Math.random() * 30; // 垂直偏移
+            this.bobSpeed = 0.02 + Math.random() * 0.02; // 上下浮动速度
+            this.bobPhase = Math.random() * Math.PI * 2;
+            this.bobAmount = 5 + Math.random() * 10;
+            
+            // 礼物盒大小
+            this.width = 22 + Math.random() * 28;
+            this.height = 18 + Math.random() * 22;
+            
+            // 颜色
+            const boxColors = ['#E74C3C', '#3498DB', '#2ECC71', '#9B59B6', '#F39C12', '#1ABC9C', '#E91E63', '#00BCD4'];
+            const ribbonColors = ['#FFD700', '#FFFFFF', '#FF69B4', '#C0C0C0', '#FFF59D'];
+            this.boxColor = boxColors[Math.floor(Math.random() * boxColors.length)];
+            this.ribbonColor = ribbonColors[Math.floor(Math.random() * ribbonColors.length)];
+            
+            // 自转
+            this.selfRotation = 0;
+            this.selfRotationSpeed = (Math.random() - 0.5) * 0.02;
+        }
+        
+        render(rotationOffset, ctx) {
+            // 复杂轨道：主旋转 + 自身轨道偏移
+            let mainAngle = this.baseAngle + rotationOffset * this.orbitSpeed;
+            let wobble = Math.sin(rotationOffset * 2 + this.orbitPhase) * 20;
+            let effectiveRadius = this.orbitRadius + wobble;
+            
+            let xPos = Math.cos(mainAngle) * effectiveRadius;
+            let zPos = Math.sin(mainAngle) * effectiveRadius;
+            
+            // 上下浮动
+            this.bobPhase += this.bobSpeed;
+            let yPos = TREE_HEIGHT / 2 + 30 + this.verticalOffset + Math.sin(this.bobPhase) * this.bobAmount;
+            
+            let zDepth = FOCAL_LENGTH + zPos;
+            if (zDepth < 10) zDepth = 10;
+            let scale = FOCAL_LENGTH / zDepth;
+            
+            let screenX = width / 2 + xPos * scale;
+            let screenY = height / 2 + yPos * scale + 50;
+            let boxW = this.width * scale;
+            let boxH = this.height * scale;
+            
+            // 自转
+            this.selfRotation += this.selfRotationSpeed;
+            
+            ctx.save();
+            ctx.translate(screenX, screenY - boxH / 2);
+            ctx.rotate(Math.sin(this.selfRotation) * 0.1);
+            ctx.translate(-screenX, -(screenY - boxH / 2));
+            ctx.globalAlpha = Math.min(1, scale * 0.95);
+            
+            // 礼物盒主体
+            ctx.fillStyle = this.boxColor;
+            ctx.fillRect(screenX - boxW / 2, screenY - boxH, boxW, boxH);
+            
+            // 礼物盒阴影/侧面
+            ctx.fillStyle = this.darkenColor(this.boxColor, 40);
+            ctx.fillRect(screenX - boxW / 2, screenY - boxH, boxW * 0.12, boxH);
+            ctx.fillRect(screenX - boxW / 2, screenY - boxH * 0.15, boxW, boxH * 0.15);
+            
+            // 横向丝带
+            ctx.fillStyle = this.ribbonColor;
+            ctx.fillRect(screenX - boxW / 2, screenY - boxH / 2 - boxH * 0.12, boxW, boxH * 0.24);
+            
+            // 纵向丝带
+            ctx.fillRect(screenX - boxW * 0.12, screenY - boxH, boxW * 0.24, boxH);
+            
+            // 蝴蝶结
+            ctx.beginPath();
+            ctx.ellipse(screenX - boxW * 0.18, screenY - boxH - boxH * 0.08, boxW * 0.14, boxW * 0.1, -0.3, 0, Math.PI * 2);
+            ctx.ellipse(screenX + boxW * 0.18, screenY - boxH - boxH * 0.08, boxW * 0.14, boxW * 0.1, 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // 蝴蝶结中心
+            ctx.beginPath();
+            ctx.arc(screenX, screenY - boxH - boxH * 0.05, boxW * 0.08, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.restore();
+        }
+        
+        darkenColor(color, amount) {
+            const hex = color.replace('#', '');
+            const r = Math.max(0, parseInt(hex.substr(0, 2), 16) - amount);
+            const g = Math.max(0, parseInt(hex.substr(2, 2), 16) - amount);
+            const b = Math.max(0, parseInt(hex.substr(4, 2), 16) - amount);
+            return `rgb(${r},${g},${b})`;
+        }
+    }
+    
+    // 初始化数组
+    let confetti = [];
+    let leaves = [];
+    let gifts = [];
+    let ornaments = [];
+
+    class Particle {
+        constructor(id) {
+            this.id = id;
+            this.init();
+        }
+
+        init() {
+            // 调整分布：使用更小的指数让更多粒子分布在底部
+            let progress = this.id / PARTICLE_COUNT;
+            this.y = -TREE_HEIGHT / 2 + Math.pow(progress, 0.55) * TREE_HEIGHT; // 更小的指数让底部更密集
+            let yPercent = (this.y + TREE_HEIGHT / 2) / TREE_HEIGHT;
+            this.targetRadius = yPercent * BASE_RADIUS;
+            // 增加随机半径偏移，让树更有层次感
+            this.radius = this.targetRadius * (0.85 + Math.random() * 0.3);
+            this.angle = this.id * SPIN_LAYER_DENSITY + Math.random() * 0.5;
+
+            const rand = Math.random();
+            if (rand > 0.985) {
+                // 金色星星装饰
+                this.color = `hsla(45, 100%, ${70 + Math.random() * 30}%, 1)`; 
+                this.baseSize = 3.0;
+                this.isOrnament = true;
+                this.ornamentType = 'star';
+            } else if (rand > 0.97) {
+                // 红色圆球装饰
+                this.color = `hsla(${355 + Math.random() * 10}, 90%, 50%, 1)`;
+                this.baseSize = 2.8;
+                this.isOrnament = true;
+                this.ornamentType = 'ball';
+            } else if (rand > 0.96) {
+                // 蓝色装饰球
+                this.color = `hsla(${210 + Math.random() * 20}, 85%, 55%, 1)`;
+                this.baseSize = 2.5;
+                this.isOrnament = true;
+                this.ornamentType = 'ball';
+            } else if (rand > 0.95) {
+                // 银色/白色装饰
+                this.color = `hsla(0, 0%, ${88 + Math.random() * 12}%, 1)`;
+                this.baseSize = 2.2;
+                this.isOrnament = true;
+                this.ornamentType = 'light';
+            } else if (rand > 0.94) {
+                // 紫色装饰
+                this.color = `hsla(${280 + Math.random() * 20}, 70%, 55%, 1)`;
+                this.baseSize = 2.3;
+                this.isOrnament = true;
+                this.ornamentType = 'ball';
+            } else if (rand > 0.93) {
+                // 橙色小灯
+                this.color = `hsla(${30 + Math.random() * 15}, 100%, 55%, 1)`;
+                this.baseSize = 1.8;
+                this.isOrnament = true;
+                this.ornamentType = 'light';
+            } else if (rand > 0.92) {
+                // 粉色装饰
+                this.color = `hsla(${330 + Math.random() * 20}, 80%, 70%, 1)`;
+                this.baseSize = 2.0;
+                this.isOrnament = true;
+                this.ornamentType = 'ball';
+            } else if (rand > 0.91) {
+                // 青色小灯
+                this.color = `hsla(${175 + Math.random() * 15}, 90%, 60%, 1)`;
+                this.baseSize = 1.6;
+                this.isOrnament = true;
+                this.ornamentType = 'light';
+            } else {
+                // 绿色树叶 - 大部分粒子
+                let hue = 115 + Math.random() * 55; 
+                let sat = 60 + Math.random() * 30;
+                let light = 18 + Math.random() * 32;
+                this.color = `hsla(${hue}, ${sat}%, ${light}%, 0.95)`;
+                this.baseSize = 1.4 + Math.random() * 0.8;
+                this.isOrnament = false;
+                this.ornamentType = 'leaf';
+            }
+
+            this.vx = (Math.random() - 0.5) * 25;
+            this.vy = (Math.random() - 0.5) * 25;
+            this.vz = (Math.random() - 0.5) * 25;
+            
+            this.dx = 0;
+            this.dy = 0;
+            this.dz = 0;
+        }
+
+        update() {
+            if (explodeForce > 0.01) {
+                this.dx += this.vx * explodeForce * 0.5;
+                this.dy += this.vy * explodeForce * 0.5;
+                this.dz += this.vz * explodeForce * 0.5;
+            } else {
+                this.dx *= 0.92;
+                this.dy *= 0.92;
+                this.dz *= 0.92;
+            }
+        }
+
+        render(rotationOffset, ctx) {
+            let effectiveAngle = this.angle + rotationOffset;
+            let rawX = Math.cos(effectiveAngle) * this.radius;
+            let rawZ = Math.sin(effectiveAngle) * this.radius;
+            let rawY = this.y;
+
+            let x = rawX + this.dx;
+            let y = rawY + this.dy;
+            let z = rawZ + this.dz;
+
+            let zDepth = FOCAL_LENGTH + z; 
+            if (zDepth < 10) zDepth = 10;
+            let scale = FOCAL_LENGTH / zDepth;
+
+            let screenX = width / 2 + x * scale;
+            let screenY = height / 2 + y * scale + 50; 
+
+            let size = this.baseSize * scale;
+            let alpha = Math.min(1, scale * 0.8);
+
+            ctx.fillStyle = this.color;
+            ctx.globalAlpha = alpha;
+            ctx.beginPath();
+            ctx.arc(screenX, screenY, size, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (this.isOrnament && Math.random() > 0.92) {
+                ctx.globalAlpha = alpha * 0.6;
+                ctx.beginPath();
+                ctx.arc(screenX, screenY, size * 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            
+            // 闪烁效果
+            if (this.ornamentType === 'light' && Math.random() > 0.97) {
+                ctx.globalAlpha = 0.8;
+                ctx.beginPath();
+                ctx.arc(screenX, screenY, size * 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    function initParticles() {
+        particles = [];
+        confetti = [];
+        leaves = [];
+        gifts = [];
+        ornaments = [];
+        
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            particles.push(new Particle(i));
+        }
+        for (let i = 0; i < CONFETTI_COUNT; i++) {
+            confetti.push(new Confetti());
+        }
+        for (let i = 0; i < LEAF_COUNT; i++) {
+            leaves.push(new Leaf());
+        }
+        for (let i = 0; i < GIFT_COUNT; i++) {
+            gifts.push(new GiftBox(i));
+        }
+        for (let i = 0; i < ORNAMENT_COUNT; i++) {
+            ornaments.push(new Ornament());
+        }
+    }
+    initParticles();
+
+    // 鼠标输入逻辑
+    function handleMouseMove(normalizedX) {
+        if (isHandControlling) return; // 如果正在使用手势，忽略鼠标
+        
+        let x = (normalizedX - 0.5) * 2; 
+        targetRotationSpeed = x * 0.15;
+        autoRotate = false;
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => { autoRotate = true; }, 1000);
+    }
+
+    function triggerExplode() {
+        explodeForce = 1.0;
+        // 只有第一次爆开时设置星星跳动
+        if (!hasExplodedOnce) {
+            hasExplodedOnce = true;
+            starJumpOffset = 50; // 第一次爆开时跳动
+        }
+    }
+
+    let idleTimer;
+    document.addEventListener('mousemove', (e) => { handleMouseMove(e.clientX / width); });
+    document.addEventListener('mousedown', triggerExplode);
+    document.addEventListener('touchmove', (e) => { if(e.touches.length > 0) handleMouseMove(e.touches[0].clientX / width); }, { passive: true });
+    document.addEventListener('touchstart', (e) => { triggerExplode(); if(e.touches.length > 0) handleMouseMove(e.touches[0].clientX / width); }, { passive: true });
+
+
+    // 绘制星星
+    function drawStar(ctx, rot) {
+        let x = width / 2;
+        let topY = -TREE_HEIGHT / 2;
+        let zDepth = FOCAL_LENGTH; 
+        let scale = FOCAL_LENGTH / zDepth;
+        let y = height / 2 + topY * scale + 50;
+        
+        // 星星跳动逐渐恢复（只在第一次爆开时有效）
+        if (starJumpOffset > 0) {
+            y -= starJumpOffset;
+            starJumpOffset *= 0.92; // 逐渐恢复
+            if (starJumpOffset < 0.5) starJumpOffset = 0;
+        } 
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(-rot * 2);
+        
+        ctx.shadowBlur = 30;
+        ctx.shadowColor = "rgba(255, 230, 150, 0.8)";
+        ctx.fillStyle = "#fffd70";
+        
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+            ctx.lineTo(Math.cos((18 + i * 72) / 180 * Math.PI) * 18 * scale,
+                       -Math.sin((18 + i * 72) / 180 * Math.PI) * 18 * scale);
+            ctx.lineTo(Math.cos((54 + i * 72) / 180 * Math.PI) * 8 * scale,
+                       -Math.sin((54 + i * 72) / 180 * Math.PI) * 8 * scale);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+    }
+
+    let rotation = 0;
+    function animate() {
+        ctx.clearRect(0, 0, width, height);
+
+        if (autoRotate && !isHandControlling) {
+            targetRotationSpeed = 0.004;
+        }
+        
+        currentRotationSpeed += (targetRotationSpeed - currentRotationSpeed) * 0.05;
+        rotation += currentRotationSpeed;
+
+        if (explodeForce > 0) {
+            explodeForce *= 0.94;
+            if (explodeForce < 0.001) explodeForce = 0;
+        }
+
+        // 绘制礼物盒（在最底层，复杂旋转路径）
+        gifts.forEach(g => g.render(rotation, ctx));
+        
+        // 更新并绘制树叶（贴着边缘）
+        leaves.forEach(leaf => {
+            leaf.update();
+            leaf.render(rotation, ctx);
+        });
+
+        // 更新并绘制粒子
+        particles.forEach(p => {
+            p.update();
+            p.render(rotation, ctx);
+        });
+        
+        // 更新并绘制彩带碎片
+        confetti.forEach(c => {
+            c.update();
+            c.render(rotation, ctx);
+        });
+        
+        // 更新并绘制铃铛和星星装饰
+        ornaments.forEach(o => {
+            o.update();
+            o.render(rotation, ctx);
+        });
+        
+        // 最后绘制顶部星星
+        ctx.globalAlpha = 1;
+        drawStar(ctx, rotation);
+        
+        requestAnimationFrame(animate);
+    }
+    animate();
+
+
+    /**
+     * PART 2: MediaPipe Hands Integration
+     */
+    const videoElement = document.getElementsByClassName('input_video')[0];
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const cameraPreview = document.getElementById('camera-preview');
+    const loadingText = document.getElementById('loading-text');
+
+    function onResults(results) {
+        // 隐藏 loading
+        loadingText.style.display = 'none';
+
+        // 调试：确认回调被调用
+        console.log('onResults called, hands detected:', results.multiHandLandmarks ? results.multiHandLandmarks.length : 0);
+
+        // 清除画布
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        
+        // 绘制预览画面 (不需要手动镜像，因为CSS已经做了镜像)
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            isHandControlling = true;
+            
+            // 取第一只检测到的手
+            const landmarks = results.multiHandLandmarks[0];
+            
+            // 绘制骨骼 (使用画布尺寸来正确缩放)
+            drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+            drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 2});
+
+            // 1. 旋转控制：基于食指指尖 (Index Finger Tip - 索引 8) 的 X 坐标
+            // 坐标范围 0.0 (左) - 1.0 (右)
+            const indexTip = landmarks[8];
+            const x = indexTip.x; 
+            
+            // 映射：因为CSS做了镜像，用户看到的画面是镜像的
+            // 原始x: 手在摄像头左边 -> x小; 手在摄像头右边 -> x大
+            // 镜像后用户看到的: 手在屏幕右边 -> 原始x小
+            // 所以需要反转: (0.5 - x) 让手往右移时树往右转
+            const rotationInput = (0.5 - x) * 2; // -1 to 1
+            targetRotationSpeed = rotationInput * 0.15; 
+
+
+            // 2. 爆炸控制：基于大拇指 (4) 和 食指 (8) 的距离 (Pinch)
+            const thumbTip = landmarks[4];
+            const distance = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+
+            // 当距离小于阈值时 (捏合)
+            if (distance < 0.05) {
+                explodeForce = 1.0;
+                // 视觉反馈：在预览里画个圈
+                canvasCtx.beginPath();
+                canvasCtx.arc(indexTip.x * canvasElement.width, indexTip.y * canvasElement.height, 20, 0, 2 * Math.PI);
+                canvasCtx.fillStyle = "rgba(255, 255, 0, 0.5)";
+                canvasCtx.fill();
+            }
+
+        } else {
+            // 没有检测到手，恢复自动旋转
+            isHandControlling = false;
+        }
+    }
+
+    // 停止摄像头
+    function stopCamera() {
+        const btn = document.getElementById('btn-camera');
+        
+        if (cameraInstance) {
+            cameraInstance.stop();
+            cameraInstance = null;
+        }
+        
+        if (handsInstance) {
+            handsInstance.close();
+            handsInstance = null;
+        }
+        
+        isCameraRunning = false;
+        isHandControlling = false;
+        cameraPreview.style.display = 'none';
+        btn.innerText = "开启摄像头控制";
+        btn.style.background = "rgba(255, 255, 255, 0.1)";
+        btn.style.borderColor = "rgba(255, 255, 255, 0.3)";
+        btn.disabled = false;
+        
+        console.log('摄像头已关闭');
+    }
+
+    // 启动摄像头逻辑
+    function startCamera() {
+        const btn = document.getElementById('btn-camera');
+        
+        // 如果摄像头正在运行，则关闭
+        if (isCameraRunning) {
+            stopCamera();
+            return;
+        }
+        
+        btn.innerText = "正在启动...";
+        btn.disabled = true;
+        
+        cameraPreview.style.display = 'block';
+        loadingText.style.display = 'block';
+
+        console.log('正在初始化 MediaPipe Hands...');
+        
+        // 检查 MediaPipe 库是否加载成功
+        if (typeof Hands === 'undefined') {
+            console.error('MediaPipe Hands 库未加载！');
+            alert('MediaPipe Hands 库加载失败，请检查网络连接并刷新页面。');
+            btn.innerText = "库加载失败";
+            btn.disabled = false;
+            loadingText.style.display = 'none';
+            return;
+        }
+        
+        if (typeof Camera === 'undefined') {
+            console.error('MediaPipe Camera 库未加载！');
+            alert('MediaPipe Camera 库加载失败，请检查网络连接并刷新页面。');
+            btn.innerText = "库加载失败";
+            btn.disabled = false;
+            loadingText.style.display = 'none';
+            return;
+        }
+
+        console.log('库加载成功，创建 Hands 实例...');
+
+        try {
+            handsInstance = new Hands({locateFile: (file) => {
+                console.log('加载 MediaPipe 文件:', file);
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+            }});
+        } catch (e) {
+            console.error('创建 Hands 实例失败:', e);
+            alert('创建 Hands 实例失败: ' + e.message);
+            btn.innerText = "初始化失败";
+            btn.disabled = false;
+            loadingText.style.display = 'none';
+            return;
+        }
+
+        console.log('Hands 实例创建成功，设置选项...');
+
+        handsInstance.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        handsInstance.onResults(onResults);
+
+        console.log('开始初始化模型...');
+
+        // 初始化 hands 模型
+        handsInstance.initialize().then(() => {
+            console.log('MediaPipe Hands 初始化完成，启动摄像头...');
+            
+            cameraInstance = new Camera(videoElement, {
+                onFrame: async () => {
+                    if (handsInstance && isCameraRunning) {
+                        try {
+                            await handsInstance.send({image: videoElement});
+                        } catch (e) {
+                            console.error('发送帧到 MediaPipe 失败:', e);
+                        }
+                    }
+                },
+                width: 320,
+                height: 240
+            });
+
+            console.log('Camera 实例创建成功，调用 start()...');
+
+            cameraInstance.start()
+                .then(() => {
+                    console.log('摄像头启动成功');
+                    isCameraRunning = true;
+                    btn.innerText = "关闭摄像头控制";
+                    btn.style.background = "rgba(0, 255, 0, 0.2)";
+                    btn.style.borderColor = "rgba(0, 255, 0, 0.5)";
+                    btn.disabled = false;
+                })
+                .catch(err => {
+                    console.error('摄像头启动失败:', err);
+                    btn.innerText = "启动失败";
+                    btn.disabled = false;
+                    loadingText.style.display = 'none';
+                    alert("摄像头启动失败。请确保：\n1. 已授权摄像头权限\n2. 在 HTTPS 或 localhost 环境下运行\n3. 没有其他程序占用摄像头\n\n错误: " + err.message);
+                });
+        }).catch(err => {
+            console.error('MediaPipe Hands 初始化失败:', err);
+            btn.innerText = "初始化失败";
+            btn.disabled = false;
+            loadingText.style.display = 'none';
+            alert("MediaPipe 初始化失败: " + err.message);
+        });
+    }
+
+    // 绑定按钮点击事件
+    document.getElementById('btn-camera').addEventListener('click', function() {
+        console.log('按钮被点击');
+        startCamera();
+    });
+
+</script>
+</body>
+</html>
